@@ -127,8 +127,10 @@ def load_language_data():
     return eng_tok, ans
 
 
-test_size = 5000
-train_size = 10000
+train_size = 200
+test_size = 200
+# test_size = 5000
+# train_size = 10000
 train_test_split = 0.8
 num_per_lang = 5 # 10
 def prep_maml_test(eng_tok, langs, desc):

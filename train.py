@@ -9,6 +9,7 @@ import random
 import copy
 import numpy as np
 import os
+from tqdm import tqdm
 
 batch_size = 5
 
@@ -51,14 +52,19 @@ for outer_step in range(1):
         model.reset_adapter()
 
         cur_data = get_train_set()
+
+        #### RUN SUPPORT SET
         inner_optim = Adam(model.inner_params(), lr=3e-4)
 
         support_loader = infinite_dataloader(cur_data)
 
         model.freeze_all()
         model.unfreeze_lora()
+        # zero out all grads for safety
+        for p in model.parameters():
+            if p.grad is not None: p.grad.zero_()
 
-        for inner_step in range(10):
+        for inner_step in tqdm(range(10), desc=f'Outer {outer_step} Task {task_num} Forward Pass'):
             batch = next(support_loader)
 
             cur_state = {
@@ -81,14 +87,30 @@ for outer_step in range(1):
             inner_optim.zero_grad()
 
 
-
-        # do I want to differentiate Adam???
+        #### ACCUMULATE QUERY SET
         cur_data.query_mode = True
         query_loader = DataLoader(cur_data, batch_size=batch_size, collate_fn=pad_to_longest)
 
-        # accumulate full query set here
+        model.unfreeze_all()
+        grad_scaler = len(cur_data)
+
+        bar = tqdm(total=len(query_loader), desc=f'Outer {outer_step} Task {task_num} Accumulating Query Loss ----')
+        total_loss = 0
+        total_steps = 0
+        for batch in query_loader:
+            my_batch = len(batch[-1])
+            loss = run_batch_get_loss(model, batch) * my_batch
+            total_loss += loss.item()
+            total_steps += my_batch
+            (loss / grad_scaler).backward()
+            bar.set_description(f'Outer {outer_step} Task {task_num} Accumulating Query Loss {total_loss / total_steps:.4f}')
+            bar.update(1)
+
+        # setup outer and inner grads
 
 
+        #### BACKPROP TROUGH TRAINING
+        # do I want to differentiate Adam???
         inner_optim = Adam(model.inner_params(), lr=3e-4, differentiable=True)
 
         exit()
