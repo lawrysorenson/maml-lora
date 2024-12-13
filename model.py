@@ -62,7 +62,6 @@ class AdapterModel(nn.Module):
         for l in self.lora_mods: ans += l.lora_params()
         return ans
 
-
     def outer_params(self):
         exc = set(self.inner_params())
         ans = [p for p in self.parameters() if p not in exc]
@@ -71,6 +70,22 @@ class AdapterModel(nn.Module):
     def reset_adapter(self):
         nn.init.normal_(self.tgt_embed)
         for l in self.lora_mods: l.reinit()
+
+    def freeze_all(self):
+        for p in self.parameters(): p.requires_grad = False
+
+    def unfreeze_all(self):
+        for p in self.parameters(): p.requires_grad = True
+
+    def unfreeze_lora(self):
+        for p in self.inner_params(): p.requires_grad = True
+
+    def inner_state_dict(self):
+        ans = self.state_dict()
+        def filter(k):
+            if '_lora' in k: return 'lora.core' not in k
+            return 'tgt_embed' in k
+        return {k: v for k, v in ans.items() if filter(k)}
 
     def forward(self, input_ids, input_mask, dec_input_ids, dec_input_mask, input_langs, output_langs):
 

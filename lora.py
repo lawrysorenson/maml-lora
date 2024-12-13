@@ -24,11 +24,12 @@ class LoraModule(torch.nn.Module):
     return [self.a, self.b]
   
   def reinit(self):
-    if hasattr(self, 'delta'):
-      self.delta[:] = 0
-    else:
-      nn.init.normal_(self.a)
-      self.b[:] = 0  
+    with torch.no_grad():
+      if hasattr(self, 'delta'):
+        self.delta[:] = 0
+      else:
+        nn.init.normal_(self.a)
+        self.b[:] = 0  
 
 class LoraCaller:
    def __init__(self, lora_name):
