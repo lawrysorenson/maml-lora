@@ -7,9 +7,13 @@ from model import AdapterModel
 from torch.optim import Adam
 import random
 import copy
-import numpy as np
+# import numpy as np
 import os
 from tqdm import tqdm
+
+# For saving numpy rng
+# not sure if this is needed
+# torch.serialization.add_safe_globals([np.core.multiarray._reconstruct, np.ndarray])
 
 batch_size = 5
 
@@ -48,6 +52,8 @@ for outer_step in range(1):
 
     outer_grads = None
 
+    prev_model = copy.deepcopy(model)
+
     for task_num in range(num_tasks):
         model.reset_adapter()
 
@@ -64,7 +70,9 @@ for outer_step in range(1):
         for p in model.parameters():
             if p.grad is not None: p.grad.zero_()
 
-        for inner_step in tqdm(range(10), desc=f'Outer {outer_step} Task {task_num} Forward Pass'):
+        model.train()
+        num_adapt_steps = 10
+        for inner_step in tqdm(range(num_adapt_steps), desc=f'Outer {outer_step} Task {task_num} Forward Pass'):
             batch = next(support_loader)
 
             cur_state = {
@@ -73,7 +81,7 @@ for outer_step in range(1):
                 'inner_optim': inner_optim.state_dict(),
                 'rng': {
                     'torch': torch.get_rng_state(),
-                    'numpy': np.random.get_state(),
+                    # 'numpy': np.random.get_state(),
                     'random': random.getstate()
                 }
             }
@@ -92,6 +100,7 @@ for outer_step in range(1):
         query_loader = DataLoader(cur_data, batch_size=batch_size, collate_fn=pad_to_longest)
 
         model.unfreeze_all()
+        model.eval()
         grad_scaler = len(cur_data)
 
         bar = tqdm(total=len(query_loader), desc=f'Outer {outer_step} Task {task_num} Accumulating Query Loss ----')
@@ -118,8 +127,34 @@ for outer_step in range(1):
         inner_grads = [x.clone().detach() for x in model.inner_params()]
 
         #### BACKPROP TROUGH TRAINING
-        # do I want to differentiate Adam???
         inner_optim = Adam(model.inner_params(), lr=3e-4, differentiable=True)
+
+        model.train()
+        prev_model.train()
+        prev_model.unfreeze_all()
+        for inner_step in range(num_adapt_steps-1,-1,-1):
+            path = os.path.join(cache_dir, f'{inner_step}.pt')
+            checkpoint = torch.load(path, weights_only=True)
+
+            batch = checkpoint['batch']
+            torch.set_rng_state(checkpoint['rng']['torch'])
+            random.setstate(checkpoint['rng']['random'])
+
+            inner_optim.load_state_dict(checkpoint['inner_optim'])
+
+            inner_state_dict = checkpoint['inner_state']
+            model.load_state_dict(inner_state_dict, strict=False)
+            prev_model.load_state_dict(inner_state_dict, strict=False)
+
+            model.freeze_all()
+            prev_model.unfreeze_all()
+
+            print(model.inner_params()[0])
+            print(prev_model.inner_params()[0])
+
+
+
+            break
 
         exit()
 
