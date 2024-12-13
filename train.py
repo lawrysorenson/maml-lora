@@ -105,9 +105,17 @@ for outer_step in range(1):
             (loss / grad_scaler).backward()
             bar.set_description(f'Outer {outer_step} Task {task_num} Accumulating Query Loss {total_loss / total_steps:.4f}')
             bar.update(1)
+        bar.close()
 
         # setup outer and inner grads
+        if outer_grads is None:
+            outer_grads = [x.clone().detach() for x in model.outer_params()]
+        else:
+            with torch.no_grad():
+                # TODO: None checking
+                outer_grads = [a+b for a, b in zip(outer_grads, model.outer_params())]
 
+        inner_grads = [x.clone().detach() for x in model.inner_params()]
 
         #### BACKPROP TROUGH TRAINING
         # do I want to differentiate Adam???
@@ -120,12 +128,13 @@ for outer_step in range(1):
         # figure out backprop here
         break
 
+    # TODO: scale by task num
+    # outer_grads
+
+
     # TODO: validation, find best model
     break
-
-# for iid, imask, diid, dmask, ilang, dlang in :
-
-    break
+    
 
 
-# run test set
+# TODO: run test set

@@ -127,8 +127,8 @@ def load_language_data():
     return eng_tok, ans
 
 
-train_size = 200
-test_size = 200
+train_size = 100
+test_size = 100
 # test_size = 5000
 # train_size = 10000
 train_test_split = 0.8
