@@ -29,7 +29,8 @@ config = config = BartConfig(
     eos_token_id = 2,
     is_encoder_decoder = True,
     decoder_start_token_id = 1,
-    forced_eos_token_id = 2
+    forced_eos_token_id = 2,
+    attn_implementation="eager"
 )
 
 # seperate embeddings
@@ -51,6 +52,10 @@ class AdapterModel(nn.Module):
         nn.init.normal_(self.tgt_embed)
 
         self.model = BartModel(config)
+
+        # Is this allowed???
+        del self.model.encoder.embed_tokens
+        del self.model.decoder.embed_tokens
 
         # other language in encoder
         # store as a normal list

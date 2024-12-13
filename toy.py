@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from torch.optim import Adam
+from torch.optim import Adam, SGD
 import torch.autograd as auto
 import copy
 
@@ -13,37 +13,16 @@ test2 = copy.deepcopy(test)
 test2.requires_grad = False
 test2.grad = sub
 
-optim = Adam([test2], lr=1e-2, differentiable=True)
+optim = SGD([test2], lr=1e-2, differentiable=True)
 optim.step()
 
-# test2.backward(gradient=torch.tensor([5., 7., 9.]))
+other = torch.tensor([5., 7., 9.])
 
-# (test2 * test2).sum().backward()
+# test2.backward(gradient=other)
+
+(other * test2).sum().backward()
 
 print(test2)
 print(test2.grad)
 print(test)
 print(test.grad)
-exit()
-
-# loss.backward(retain_graph=True, create_graph=True)
-
-test2 = copy.deepcopy(test)
-test2.requires_grad = False
-test2.grad = test.grad
-test.grad.zero_()
-
-print(test2.grad)
-print(test.grad)
-
-test.grad.sum().backward()
-
-print(test2.grad)
-print(test.grad)
-
-
-
-print(test)
-print(test2)
-
-# print(test)

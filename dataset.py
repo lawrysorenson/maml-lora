@@ -27,7 +27,7 @@ data_dir = '/home/lawry/cs674/data/'
 def train_spm(sents):
     vocab_size = 8000
 
-    while vocab_size >= 500:
+    while vocab_size >= 5: # 500
         model = io.BytesIO()
         try:
             spm.SentencePieceTrainer.train(
