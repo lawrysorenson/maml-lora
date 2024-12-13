@@ -1,8 +1,10 @@
 
 import sentencepiece as spm
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
+import torch
 import random
 import os
+import sys
 from tqdm import tqdm
 import io
 
@@ -27,7 +29,7 @@ def train_spm(sents):
 
     while vocab_size >= 500:
         model = io.BytesIO()
-        try:            
+        try:
             spm.SentencePieceTrainer.train(
                 sentence_iterator=iter(sents),
                 model_writer=model,
@@ -36,7 +38,8 @@ def train_spm(sents):
                 unk_id=0, # potentially disable more of these, right now is consistent with English usage
                 bos_id=-1,
                 pad_id=1,
-                eos_id=2
+                eos_id=2,
+                minloglevel=100
             )
         except Exception as e:
             if 'Vocabulary size too high':
@@ -48,9 +51,6 @@ def train_spm(sents):
 
         sent = sents[0]
 
-        print(sent)
-        print(ans.encode(sent))
-
         return ans
     
     raise Exception('Vocab too small')
@@ -61,32 +61,35 @@ class MAMLDataset(Dataset):
         self.test_data = test_data
         self.eng_tok = eng_tok
         self.tgt_tok = train_spm([s[1] for s in train_data]) # CREATE SPM ON THE FLY
-        self.test_mode = False
+        self.query_mode = False
         self.dir = -1
 
     def __len__(self):
-        data = [self.train_data, self.test_data][self.test_mode]
+        data = [self.train_data, self.test_data][self.query_mode]
         return len(data)
     
     def __getitem__(self, i):
-        data = [self.train_data, self.test_data][self.test_mode]
+        data = [self.train_data, self.test_data][self.query_mode]
 
         atok = self.eng_tok
         btok = self.tgt_tok
         a, b = data[i]
 
+        # TODO: SPM SAMPLING
         a = atok.encode(a)
-        b = btok.encode(b)
+        b = [t + 16000 for t in btok.encode(b)]
+
+        eng_lang = atok.piece_to_id('<lang>')
+        tgt_lang = btok.piece_to_id('<lang>') + 16000
 
         if self.dir==1 or (self.dir == -1 and random.random() < 0.5):
-            a,b = b,a
+            
+            # flipped direction            
+            return [tgt_lang, eng_lang] + b, [eng_lang] + a + [atok.eos_id()], 1
+        else:
+            # normal direction
+            return [eng_lang, tgt_lang] + a, [tgt_lang] + b + [atok.eos_id()], 0
 
-        print(a, b)
-
-        # say direction
-
-        # b negative?
-        
 
 def load_tok(lang):
     path = os.path.join(data_dir, 'toks', f'{lang}.model')
@@ -125,31 +128,48 @@ def load_language_data():
 test_size = 5000
 train_size = 10000
 train_test_split = 0.8
-def prep_maml_test(eng_tok, langs):
+num_per_lang = 5 # 10
+def prep_maml_test(eng_tok, langs, desc):
     ans = []
+
+    bar = tqdm(total=num_per_lang*len(langs), desc=desc)
     for segs in langs:
-        for _ in range(5):
+        for _ in range(num_per_lang):
             random.shuffle(segs)
             split = int(len(segs) * train_test_split)
             train_data = segs[:split][:train_size]
             test_data = segs[split:][:test_size]
 
             sub = MAMLDataset(eng_tok, train_data, test_data)
-            for a, b, d in sub:
-                print(a, b, d)
-            exit()
             ans += [sub]
+            bar.update(1)
+    bar.close()
     return ans
+
+PAD_ID = 1
+def _pad_helper(data):
+  sizes = [len(row) for row in data]
+
+  max_size = max(sizes)
+
+  for row in data:
+    row.extend([PAD_ID]*(max_size - len(row)))
+
+  data = torch.tensor(data)
+
+  mask = torch.ones(data.size())
+  for i,s in enumerate(sizes): mask[i,s:] = 0
+
+  return data, mask
+
+def pad_to_longest(batch):
+    srcs, tgts, dirs = zip(*batch)
+
+    return *_pad_helper(srcs), *_pad_helper(tgts), torch.tensor(dirs)
 
 def prepare_datasets():
     
     eng_tok, langs = load_language_data()
-
-    print(dir(eng_tok))
-    # print(eng_tok.piece_to_id('<lang>'))
-    # print(eng_tok.eos_id())
-    # print(eng_tok.bos_id()) # use pad = bos
-    # print(eng_tok.pad_id())
 
     random.shuffle(langs)
      
@@ -162,10 +182,32 @@ def prepare_datasets():
     val_langs = langs[train_cut:val_cut]
     test_langs = langs[val_cut:]
 
-    val_set = prep_maml_test(eng_tok, val_langs)
+    val_set = prep_maml_test(eng_tok, val_langs, 'Preparing val set')
+    test_set = prep_maml_test(eng_tok, test_langs, 'Preparing test set')
+
+    def get_train_set(): # support and query are intermixed???
+        segs = random.choice(train_langs)
+        random.shuffle(segs)
+        split = int(len(segs) * train_test_split)
+        train_data = segs[:split][:train_size]
+        test_data = segs[split:][:test_size]
+
+        sub = MAMLDataset(eng_tok, train_data, test_data)
+        return sub
+        
+
+    return get_train_set, val_set, test_set
 
 
 
 
 if __name__ == '__main__':
-    prepare_datasets()
+    a, b, c = prepare_datasets()
+
+    for x, y, z in a():
+        print(x, y, z)
+        break
+
+    # for a, am, b, bm, d in DataLoader(val_set[0], batch_size=5, collate_fn=pad_to_longest):
+    #     print(a, am, b, bm, d)
+    #     break
