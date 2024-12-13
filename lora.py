@@ -18,6 +18,17 @@ class LoraModule(torch.nn.Module):
   def forward(self):
     if hasattr(self, 'delta'): return self.core + self.delta
     return self.core + self.b @ self.a
+  
+  def lora_params(self):
+    if hasattr(self, 'delta'): return [self.delta]
+    return [self.a, self.b]
+  
+  def reinit(self):
+    if hasattr(self, 'delta'):
+      self.delta[:] = 0
+    else:
+      nn.init.normal_(self.a)
+      self.b[:] = 0  
 
 class LoraCaller:
    def __init__(self, lora_name):
@@ -33,6 +44,7 @@ def initialize_lora(model, skip=set(), r=1):
 
   new_class_mapper = dict()
   new_classes = set()
+  ans = []
   for key in sorted(state_dict):
     if key in skip: continue
 
@@ -43,9 +55,10 @@ def initialize_lora(model, skip=set(), r=1):
 
     core = getattr(it, name)
 
+
     if isinstance(core, nn.Parameter):
       mod = LoraModule(core, r)
-    #   print(key, id(mod))
+      ans += [mod]
 
       lora_name = name + '_lora'
       setattr(it, lora_name, mod)
@@ -76,16 +89,4 @@ def initialize_lora(model, skip=set(), r=1):
         caller = LoraCaller(lora_name)
         setattr(new_class, name, property(caller.call))
 
-model = CharRNN(64, 64, 64, n_layers=3)
-
-print(len(list(model.parameters())))
-
-print(model.decoder.weight)
-initialize_lora(model, {'encoder.weight'})
-
-print(len(list(model.parameters())))
-
-
-# print(model.state_dict())
-
-# print(model)
+  return ans

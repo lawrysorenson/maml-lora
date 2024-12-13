@@ -62,7 +62,9 @@ class MAMLDataset(Dataset):
         self.eng_tok = eng_tok
         self.tgt_tok = train_spm([s[1] for s in train_data]) # CREATE SPM ON THE FLY
         self.query_mode = False
-        self.dir = -1
+        self.dir = 1 # other to English
+        self.src_lang = 'eng'
+        self.tgt_lang = 'oth' # placeholder
 
     def __len__(self):
         data = [self.train_data, self.test_data][self.query_mode]
@@ -77,18 +79,18 @@ class MAMLDataset(Dataset):
 
         # TODO: SPM SAMPLING
         a = atok.encode(a)
-        b = [t + 16000 for t in btok.encode(b)]
+        b = [t for t in btok.encode(b)]
 
         eng_lang = atok.piece_to_id('<lang>')
-        tgt_lang = btok.piece_to_id('<lang>') + 16000
+        tgt_lang = btok.piece_to_id('<lang>')
 
         if self.dir==1 or (self.dir == -1 and random.random() < 0.5):
             
             # flipped direction            
-            return [tgt_lang, eng_lang] + b, [eng_lang] + a + [atok.eos_id()], 1
+            return [tgt_lang] + b, [eng_lang] + a + [atok.eos_id()], self.tgt_lang, self.src_lang
         else:
             # normal direction
-            return [eng_lang, tgt_lang] + a, [tgt_lang] + b + [atok.eos_id()], 0
+            return [eng_lang] + a, [tgt_lang] + b + [btok.eos_id()], self.src_lang, self.tgt_lang
 
 
 def load_tok(lang):
@@ -143,6 +145,7 @@ def prep_maml_test(eng_tok, langs, desc):
             sub = MAMLDataset(eng_tok, train_data, test_data)
             ans += [sub]
             bar.update(1)
+            break # REMOVE THIS
     bar.close()
     return ans
 
@@ -163,9 +166,9 @@ def _pad_helper(data):
   return data, mask
 
 def pad_to_longest(batch):
-    srcs, tgts, dirs = zip(*batch)
+    srcs, tgts, ins, outs = zip(*batch)
 
-    return *_pad_helper(srcs), *_pad_helper(tgts), torch.tensor(dirs)
+    return *_pad_helper(srcs), *_pad_helper(tgts), ins, outs
 
 def prepare_datasets():
     
