@@ -21,7 +21,10 @@ import math
 device_name = 'cuda' if 'CUDA_VISIBLE_DEVICES' in os.environ else 'cpu'
 device = torch.device(device_name)
 
-batch_size = 32
+batch_size = 128
+num_workers = 2
+num_passes = 3
+model_suffix = 'base'
 
 cache_dir = '/home/pipoika3/nobackup/autodelete/temp/'
 cache_dir += f'maml-lora-{random.randint(0, 10**9-1):09d}'
@@ -53,17 +56,17 @@ def run_batch_get_loss(model, batch):
 
 def infinite_dataloader(dataset):
     while True:
-        yield from DataLoader(dataset, batch_size=batch_size, collate_fn=pad_to_longest)
+        yield from DataLoader(dataset, batch_size=batch_size, collate_fn=pad_to_longest, num_workers=num_workers)
 
 def safe_add(a, b):
     if a is None: return b
     if b is None: return a
     return a+b
 
-outer_optim = Adam(model.outer_params(), lr=1e-3)
+outer_optim = Adam(model.outer_params(), lr=3e-4)
 criterion = nn.CrossEntropyLoss(ignore_index=1)
 
-model_suffix = 'base'
+model.to(device)
 
 # resume from checkpoint
 outer_step = 0
@@ -73,14 +76,17 @@ if os.path.exists(f'checkpoint_{model_suffix}.pt'):
     outer_step = outer_state['outer_step']
     best_val = outer_state['best_val']
     model.load_state_dict(outer_state['model_state'])
+    # optim need cpu???
     outer_optim.load_state_dict(outer_state['optim_state'])
 
-model.to(device)
 
-for outer_step in range(outer_step, 10):
+for outer_step in range(outer_step, 1000):
 
-    num_tasks = 3 # was 2
-    approx_level = 0 # change this
+    num_tasks = 1 + min(9, outer_step // 20) # was 2
+    approx_level = 1 # change this
+    num_full_level = 2
+
+    max_num_steps = 10 + outer_step # warm this up
 
     outer_grads = None
     approx_grads = None
@@ -103,25 +109,27 @@ for outer_step in range(outer_step, 10):
             if p.grad is not None: p.grad.zero_()
 
         model.train()
-        num_adapt_steps = len(support_loader) # grow this with the number of outer steps
+        num_adapt_steps = len(cur_data) * num_passes // batch_size # grow this with the number of outer steps
+        num_adapt_steps = min(num_adapt_steps, max_num_steps)
         bar = tqdm(range(num_adapt_steps), desc=f'Outer {outer_step} Task {task_num} Forward Pass Loss ----')
         for inner_step in bar:
             batch = next(support_loader)
 
             # Could do grad accum here
 
-            cur_state = {
-                'batch': batch,
-                'inner_state': model.inner_state_dict(),
-                'inner_optim': inner_optim.state_dict(),
-                'rng': {
-                    'torch': torch.get_rng_state(),
-                    # 'numpy': np.random.get_state(),
-                    'random': random.getstate()
+            if num_adapt_steps - inner_step <= num_full_level:
+                cur_state = {
+                    'batch': batch,
+                    'inner_state': model.inner_state_dict(),
+                    'inner_optim': inner_optim.state_dict(),
+                    'rng': {
+                        'torch': torch.get_rng_state(),
+                        # 'numpy': np.random.get_state(),
+                        'random': random.getstate()
+                    }
                 }
-            }
-            path = os.path.join(cache_dir, f'{inner_step}.pt')
-            torch.save(cur_state, path)
+                path = os.path.join(cache_dir, f'{inner_step}.pt')
+                torch.save(cur_state, path)
 
             loss = run_batch_get_loss(model, batch)
             bar.set_description(f'Outer {outer_step} Task {task_num} Forward Pass Loss {loss.item():.4f}')
@@ -134,7 +142,7 @@ for outer_step in range(outer_step, 10):
 
         #### ACCUMULATE QUERY SET
         cur_data.query_mode = True
-        query_loader = DataLoader(cur_data, batch_size=batch_size, collate_fn=pad_to_longest)
+        query_loader = DataLoader(cur_data, batch_size=batch_size, collate_fn=pad_to_longest, num_workers=num_workers)
 
         model.unfreeze_all()
         model.eval()
@@ -174,7 +182,7 @@ for outer_step in range(outer_step, 10):
 
         model.train()
         # Vanishing gradient here???, consider only doing a few steps to minimize it work needed
-        for inner_step in tqdm(range(num_adapt_steps), desc=f'Outer {outer_step} Task {task_num} Backward Pass'):
+        for inner_step in tqdm(range(min(num_adapt_steps, num_full_level)), desc=f'Outer {outer_step} Task {task_num} Backward Pass'):
             path = os.path.join(cache_dir, f'{num_adapt_steps-1-inner_step}.pt')
             checkpoint = torch.load(path, weights_only=True)
 
@@ -236,7 +244,21 @@ for outer_step in range(outer_step, 10):
 
 
     if outer_grads is not None:
-        # TODO: consider computing angle between full and approx here
+        # Compute approx angle
+        if approx_grads is not None:
+            with torch.no_grad():
+                dot_prod = 0
+                a_norm = 0
+                b_norm = 0
+                for a, b in zip(outer_grads, approx_grads):
+                    if a is not None and b is not None:
+                        dot_prod += (a * b).sum()
+                        a_norm += (a * a).sum()
+                        b_norm += (b * b).sum()
+                rat = dot_prod / (a_norm * b_norm)**0.5
+                rat = max(min(1, rat), -1)
+                angle = math.acos(rat) * 180 / math.pi
+                print(f'Approximation cos {rat}')
 
         with torch.no_grad():
             for p, g in zip(model.outer_params(), outer_grads):
@@ -246,61 +268,63 @@ for outer_step in range(outer_step, 10):
         outer_optim.zero_grad() # not really needed, but doesn't hurt to be safe
 
     ### VALIDATION
-    val_perf = 0
-    for i, cur_data in enumerate(val_sets):
-        model.reset_adapter()
+    if (outer_step + 1) % 5 == 0:
+        val_perf = 0
+        for i, cur_data in enumerate(val_sets):
+            model.reset_adapter()
 
-        #### RUN SUPPORT SET
-        inner_optim = SGD(model.inner_params(), lr=1e-3)
+            #### RUN SUPPORT SET
+            inner_optim = SGD(model.inner_params(), lr=1e-3)
 
-        # TODO: shuffling here can make it non deterministic, but we do want to shuffle across epochs
-        support_loader = infinite_dataloader(cur_data)
+            # TODO: shuffling here can make it non deterministic, but we do want to shuffle across epochs
+            support_loader = infinite_dataloader(cur_data)
 
-        model.freeze_all()
-        model.unfreeze_lora()
-        # zero out all grads for safety
-        for p in model.parameters():
-            if p.grad is not None: p.grad.zero_()
+            model.freeze_all()
+            model.unfreeze_lora()
+            # zero out all grads for safety
+            for p in model.parameters():
+                if p.grad is not None: p.grad.zero_()
 
-        model.train()
-        num_adapt_steps = len(support_loader)
-        bar = tqdm(range(num_adapt_steps), desc=f'Outer {outer_step} Validation {i+1}/{len(val_sets)} Forward Pass Loss ----')
-        for inner_step in bar:
-            batch = next(support_loader)
+            model.train()
+            num_adapt_steps = len(cur_data) * num_passes // batch_size
+            num_adapt_steps = min(num_adapt_steps, max_num_steps)
+            bar = tqdm(range(num_adapt_steps), desc=f'Outer {outer_step} Validation {i+1}/{len(val_sets)} Forward Pass Loss ----')
+            for inner_step in bar:
+                batch = next(support_loader)
 
-            loss = run_batch_get_loss(model, batch)
-            bar.set_description(f'Outer {outer_step} Validation {i+1}/{len(val_sets)} Forward Pass Loss {loss.item():.4f}')
+                loss = run_batch_get_loss(model, batch)
+                bar.set_description(f'Outer {outer_step} Validation {i+1}/{len(val_sets)} Forward Pass Loss {loss.item():.4f}')
 
-            loss.backward()
-            inner_optim.step()
-            inner_optim.zero_grad()
-        bar.close()
-
-        #### EVALUATE QUERY SET
-        cur_data.query_mode = True
-        query_loader = DataLoader(cur_data, batch_size=batch_size, collate_fn=pad_to_longest)
-
-        with torch.no_grad():
-            model.eval()
-
-            bar = tqdm(total=len(query_loader), desc=f'Outer {outer_step} Validation {i+1}/{len(val_sets)} Query Loss ----')
-            total_loss = 0
-            total_steps = 0
-            for batch in query_loader:
-                my_batch = len(batch[-1])
-                loss = run_batch_get_loss(model, batch) * my_batch
-                total_loss += loss.item()
-                total_steps += my_batch
-                bar.set_description(f'Outer {outer_step} Validation {i+1}/{len(val_sets)} Query Loss {total_loss / total_steps:.4f}')
-                bar.update(1)
+                loss.backward()
+                inner_optim.step()
+                inner_optim.zero_grad()
             bar.close()
-            val_perf += total_loss / total_steps
-    val_perf /= len(val_sets)
 
-    if val_perf < best_val:
-        best_val = val_perf
-        print(f'Best performance so far {best_val}')
-        torch.save(model.state_dict(), f'best_model_{model_suffix}.pt')
+            #### EVALUATE QUERY SET
+            cur_data.query_mode = True
+            query_loader = DataLoader(cur_data, batch_size=batch_size, collate_fn=pad_to_longest, num_workers=num_workers)
+
+            with torch.no_grad():
+                model.eval()
+
+                bar = tqdm(total=len(query_loader), desc=f'Outer {outer_step} Validation {i+1}/{len(val_sets)} Query Loss ----')
+                total_loss = 0
+                total_steps = 0
+                for batch in query_loader:
+                    my_batch = len(batch[-1])
+                    loss = run_batch_get_loss(model, batch) * my_batch
+                    total_loss += loss.item()
+                    total_steps += my_batch
+                    bar.set_description(f'Outer {outer_step} Validation {i+1}/{len(val_sets)} Query Loss {total_loss / total_steps:.4f}')
+                    bar.update(1)
+                bar.close()
+                val_perf += total_loss / total_steps
+        val_perf /= len(val_sets)
+
+        if val_perf < best_val:
+            best_val = val_perf
+            print(f'Best performance so far {best_val}')
+            torch.save(model.state_dict(), f'best_model_{model_suffix}.pt')
 
 
     # save a checkpoint now
@@ -337,7 +361,7 @@ for i, cur_data in enumerate(test_sets):
         if p.grad is not None: p.grad.zero_()
 
     model.train()
-    num_adapt_steps = len(support_loader)
+    num_adapt_steps = len(cur_data) * num_passes // batch_size
     bar = tqdm(range(num_adapt_steps), desc=f'Test Set {i+1}/{len(val_sets)} Forward Pass Loss ----')
     for inner_step in bar:
         batch = next(support_loader)
@@ -352,7 +376,7 @@ for i, cur_data in enumerate(test_sets):
 
     #### EVALUATE QUERY SET
     cur_data.query_mode = True
-    query_loader = DataLoader(cur_data, batch_size=batch_size, collate_fn=pad_to_longest)
+    query_loader = DataLoader(cur_data, batch_size=batch_size, collate_fn=pad_to_longest, num_workers=num_workers)
 
     with torch.no_grad():
         model.eval()

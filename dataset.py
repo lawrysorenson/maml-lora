@@ -45,7 +45,8 @@ def train_spm(sents):
                 bos_id=-1,
                 pad_id=1,
                 eos_id=2,
-                minloglevel=100
+                minloglevel=100,
+                num_threads=4
             )
         except Exception as e:
             if 'Vocabulary size too high':
@@ -136,7 +137,7 @@ def load_language_data():
 test_size = 5000
 train_size = 10000
 train_test_split = 0.8
-num_per_lang = 5 # 10
+num_per_lang = 2
 def prep_maml_test(eng_tok, langs, desc):
     ans = []
 
