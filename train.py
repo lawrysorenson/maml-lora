@@ -11,15 +11,19 @@ import torch.autograd as auto
 import os
 from tqdm import tqdm
 import time
+import math
 
 # import numpy as np
 # For saving numpy rng
 # not sure if this is needed
 # torch.serialization.add_safe_globals([np.core.multiarray._reconstruct, np.ndarray])
 
+device_name = 'cuda' if 'CUDA_VISIBLE_DEVICES' in os.environ else 'cpu'
+device = torch.device(device_name)
+
 batch_size = 2
 
-cache_dir = 'temp/'
+cache_dir = '/home/pipoika3/nobackup/autodelete/temp/'
 cache_dir += f'maml-lora-{random.randint(0, 10**9-1):09d}'
 
 if not os.path.exists(cache_dir): os.makedirs(cache_dir)
@@ -53,9 +57,23 @@ def safe_add(a, b):
 outer_optim = Adam(model.outer_params(), lr=1e-3)
 criterion = nn.CrossEntropyLoss(ignore_index=1)
 
-for outer_step in range(10):
+model_suffix = 'base'
 
-    num_tasks = 2
+# resume from checkpoint
+outer_step = 0
+best_val = math.inf
+if os.path.exists(f'checkpoint_{model_suffix}.pt'):
+    outer_state = torch.load(f'checkpoint_{model_suffix}.pt')
+    outer_step = outer_state['outer_step']
+    best_val = outer_state['best_val']
+    model.load_state_dict(outer_state['model_state'])
+    outer_optim.load_state_dict(outer_state['optim_state'])
+
+
+for outer_step in range(outer_step, 10):
+
+    num_tasks = 0 # was 2
+    approx_level = 0 # change this
 
     outer_grads = None
     approx_grads = None
@@ -146,7 +164,6 @@ for outer_step in range(10):
 
         model.train()
         # Vanishing gradient here???, consider only doing a few steps to minimize it work needed
-        approx_level = 0
         for inner_step in tqdm(range(num_adapt_steps), desc=f'Outer {outer_step} Task {task_num} Backward Pass'):
             path = os.path.join(cache_dir, f'{num_adapt_steps-1-inner_step}.pt')
             checkpoint = torch.load(path, weights_only=True)
@@ -207,17 +224,88 @@ for outer_step in range(10):
 
             # Maybe break early if inner_grads has really small norm
 
-    # TODO: consider computing angle between full and approx here
 
-    with torch.no_grad():
-        for p, g in zip(model.outer_params(), outer_grads):
-            p.grad = g / num_tasks if g is not None else g
+    if outer_grads is not None:
+        # TODO: consider computing angle between full and approx here
 
-    outer_optim.step()
-    outer_optim.zero_grad() # not really needed, but doesn't hurt to be safe
+        with torch.no_grad():
+            for p, g in zip(model.outer_params(), outer_grads):
+                p.grad = g / num_tasks if g is not None else g
 
-    # TODO: validation, find best model
+        outer_optim.step()
+        outer_optim.zero_grad() # not really needed, but doesn't hurt to be safe
+
+    ### VALIDATION
+    val_perf = 0
+    for i, cur_data in enumerate(val_sets):
+        model.reset_adapter()
+
+        #### RUN SUPPORT SET
+        inner_optim = SGD(model.inner_params(), lr=1e-3)
+
+        # TODO: shuffling here can make it non deterministic, but we do want to shuffle across epochs
+        support_loader = infinite_dataloader(cur_data)
+
+        model.freeze_all()
+        model.unfreeze_lora()
+        # zero out all grads for safety
+        for p in model.parameters():
+            if p.grad is not None: p.grad.zero_()
+
+        model.train()
+        num_adapt_steps = 5
+        bar = tqdm(range(num_adapt_steps), desc=f'Outer {outer_step} Validation {i+1}/{len(val_sets)} Forward Pass Loss ----')
+        for inner_step in bar:
+            batch = next(support_loader)
+
+            loss = run_batch_get_loss(model, batch)
+            bar.set_description(f'Outer {outer_step} Validation {i+1}/{len(val_sets)} Forward Pass Loss {loss.item():.4f}')
+
+            loss.backward()
+            inner_optim.step()
+            inner_optim.zero_grad()
+        bar.close()
+
+        #### EVALUATE QUERY SET
+        cur_data.query_mode = True
+        query_loader = DataLoader(cur_data, batch_size=batch_size, collate_fn=pad_to_longest)
+
+        with torch.no_grad():
+            model.eval()
+            grad_scaler = len(cur_data)
+
+            bar = tqdm(total=len(query_loader), desc=f'Outer {outer_step} Validation {i+1}/{len(val_sets)} Query Loss ----')
+            total_loss = 0
+            total_steps = 0
+            for batch in query_loader:
+                my_batch = len(batch[-1])
+                loss = run_batch_get_loss(model, batch) * my_batch
+                total_loss += loss.item()
+                total_steps += my_batch
+                bar.set_description(f'Outer {outer_step} Validation {i+1}/{len(val_sets)} Query Loss {total_loss / total_steps:.4f}')
+                bar.update(1)
+            bar.close()
+            val_perf += total_loss / total_steps
+    val_perf /= len(val_sets)
+
+    if val_perf < best_val:
+        best_val = val_perf
+        torch.save(model.state_dict(), f'best_model_{model_suffix}.pt')
+
+
+    # save a checkpoint now
     
+    outer_state = {
+        'outer_step': outer_step + 1,
+        'best_val': best_val,
+        'model_state': model.state_dict(),
+        'optim_state': outer_optim.state_dict()
+    }
 
+    torch.save(outer_state, f'checkpoint_{model_suffix}.pt')
+
+
+# load best
+f'best_model_{model_suffix}.pt'
 
 # TODO: run test set
