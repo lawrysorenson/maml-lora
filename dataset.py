@@ -22,12 +22,18 @@ spm.SentencePieceTrainer.train(
 )
 """
 
-data_dir = '/home/lawry/cs674/data/'
+# data_dir = '/home/lawry/cs674/data/'
+data_dir = '/home/pipoika3/nobackup/autodelete/church-data/'
 
 def train_spm(sents):
     vocab_size = 8000
 
-    while vocab_size >= 5: # 500
+    n = len(sents)
+    # don't use all of the train set in the tokenizer
+    # this ensures that the unk token will be trained
+    sents = sents[:int(n*0.95)]
+
+    while vocab_size >= 50: # 500
         model = io.BytesIO()
         try:
             spm.SentencePieceTrainer.train(
@@ -176,6 +182,7 @@ def prepare_datasets():
     
     eng_tok, langs = load_language_data()
 
+    random.seed(42)
     random.shuffle(langs)
      
     n = len(langs)
