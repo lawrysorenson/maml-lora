@@ -21,7 +21,7 @@ import math
 device_name = 'cuda' if 'CUDA_VISIBLE_DEVICES' in os.environ else 'cpu'
 device = torch.device(device_name)
 
-batch_size = 2
+batch_size = 32
 
 cache_dir = '/home/pipoika3/nobackup/autodelete/temp/'
 cache_dir += f'maml-lora-{random.randint(0, 10**9-1):09d}'
@@ -36,6 +36,12 @@ get_train_set, val_sets, test_sets = prepare_datasets()
 
 def run_batch_get_loss(model, batch):
     iid, imask, diid, dmask, ilang, dlang = batch
+    
+    iid = iid.to(device)
+    imask = imask.to(device)
+    diid = diid.to(device)
+    dmask = dmask.to(device)
+
     labels = diid[:,1:]
     diid = diid[:,:-1]
     dmask = dmask[:,:-1]
@@ -63,21 +69,23 @@ model_suffix = 'base'
 outer_step = 0
 best_val = math.inf
 if os.path.exists(f'checkpoint_{model_suffix}.pt'):
-    outer_state = torch.load(f'checkpoint_{model_suffix}.pt')
+    outer_state = torch.load(f'checkpoint_{model_suffix}.pt', weights_only=True, map_location=device)
     outer_step = outer_state['outer_step']
     best_val = outer_state['best_val']
     model.load_state_dict(outer_state['model_state'])
     outer_optim.load_state_dict(outer_state['optim_state'])
 
+model.to(device)
 
 for outer_step in range(outer_step, 10):
 
-    num_tasks = 0 # was 2
+    num_tasks = 3 # was 2
     approx_level = 0 # change this
 
     outer_grads = None
     approx_grads = None
 
+    # Tasks could be split across GPUs with Lightning
     for task_num in range(num_tasks):
         model.reset_adapter()
 
@@ -95,10 +103,12 @@ for outer_step in range(outer_step, 10):
             if p.grad is not None: p.grad.zero_()
 
         model.train()
-        num_adapt_steps = 5 # grow this with the number of outer steps
+        num_adapt_steps = len(support_loader) # grow this with the number of outer steps
         bar = tqdm(range(num_adapt_steps), desc=f'Outer {outer_step} Task {task_num} Forward Pass Loss ----')
         for inner_step in bar:
             batch = next(support_loader)
+
+            # Could do grad accum here
 
             cur_state = {
                 'batch': batch,
@@ -253,7 +263,7 @@ for outer_step in range(outer_step, 10):
             if p.grad is not None: p.grad.zero_()
 
         model.train()
-        num_adapt_steps = 5
+        num_adapt_steps = len(support_loader)
         bar = tqdm(range(num_adapt_steps), desc=f'Outer {outer_step} Validation {i+1}/{len(val_sets)} Forward Pass Loss ----')
         for inner_step in bar:
             batch = next(support_loader)
@@ -272,7 +282,6 @@ for outer_step in range(outer_step, 10):
 
         with torch.no_grad():
             model.eval()
-            grad_scaler = len(cur_data)
 
             bar = tqdm(total=len(query_loader), desc=f'Outer {outer_step} Validation {i+1}/{len(val_sets)} Query Loss ----')
             total_loss = 0
@@ -290,6 +299,7 @@ for outer_step in range(outer_step, 10):
 
     if val_perf < best_val:
         best_val = val_perf
+        print(f'Best performance so far {best_val}')
         torch.save(model.state_dict(), f'best_model_{model_suffix}.pt')
 
 
@@ -305,7 +315,66 @@ for outer_step in range(outer_step, 10):
     torch.save(outer_state, f'checkpoint_{model_suffix}.pt')
 
 
-# load best
-f'best_model_{model_suffix}.pt'
+# load best model
+model.load_state_dict(torch.load(f'best_model_{model_suffix}.pt', weights_only=True, map_location=device))
 
-# TODO: run test set
+
+### RUNNING TEST SET
+test_loss_perf = 0
+for i, cur_data in enumerate(test_sets):
+    model.reset_adapter()
+
+    #### RUN SUPPORT SET
+    inner_optim = SGD(model.inner_params(), lr=1e-3)
+
+    # TODO: shuffling here can make it non deterministic, but we do want to shuffle across epochs
+    support_loader = infinite_dataloader(cur_data)
+
+    model.freeze_all()
+    model.unfreeze_lora()
+    # zero out all grads for safety
+    for p in model.parameters():
+        if p.grad is not None: p.grad.zero_()
+
+    model.train()
+    num_adapt_steps = len(support_loader)
+    bar = tqdm(range(num_adapt_steps), desc=f'Test Set {i+1}/{len(val_sets)} Forward Pass Loss ----')
+    for inner_step in bar:
+        batch = next(support_loader)
+
+        loss = run_batch_get_loss(model, batch)
+        bar.set_description(f'Test Set {i+1}/{len(val_sets)} Forward Pass Loss {loss.item():.4f}')
+
+        loss.backward()
+        inner_optim.step()
+        inner_optim.zero_grad()
+    bar.close()
+
+    #### EVALUATE QUERY SET
+    cur_data.query_mode = True
+    query_loader = DataLoader(cur_data, batch_size=batch_size, collate_fn=pad_to_longest)
+
+    with torch.no_grad():
+        model.eval()
+
+        bar = tqdm(total=len(query_loader), desc=f'Test Set {i+1}/{len(val_sets)} Query Loss ----')
+        total_loss = 0
+        total_steps = 0
+        for batch in query_loader:
+            my_batch = len(batch[-1])
+            loss = run_batch_get_loss(model, batch) * my_batch
+            total_loss += loss.item()
+            total_steps += my_batch
+
+            # TODO: run generation
+
+            bar.set_description(f'Test Set {i+1}/{len(val_sets)} Query Loss {total_loss / total_steps:.4f}')
+            bar.update(1)
+        bar.close()
+        val_perf += total_loss / total_steps
+test_loss_perf /= len(test_sets)
+
+
+for _ in range(10): print()
+print('Average Test Set Loss')
+print(test_loss_perf)

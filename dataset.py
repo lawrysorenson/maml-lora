@@ -124,19 +124,17 @@ def load_language_data():
     for lang in tqdm(sorted(os.listdir(fold)), desc='Loading data'):
         segs = load_segments(lang)
 
-        segs = segs[:10000] # REMOVE
+        # segs = segs[:10000] # REMOVE
 
         ans += [segs]
 
-        if len(ans) == 10: break  # REMOVE
+        # if len(ans) == 10: break  # REMOVE
 
     return eng_tok, ans
 
 
-train_size = 100
-test_size = 100
-# test_size = 5000
-# train_size = 10000
+test_size = 5000
+train_size = 10000
 train_test_split = 0.8
 num_per_lang = 5 # 10
 def prep_maml_test(eng_tok, langs, desc):
