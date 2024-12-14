@@ -151,7 +151,7 @@ def prep_maml_test(eng_tok, langs, desc):
             sub = MAMLDataset(eng_tok, train_data, test_data)
             ans += [sub]
             bar.update(1)
-            break # REMOVE THIS
+            # break # REMOVE THIS
     bar.close()
     return ans
 
