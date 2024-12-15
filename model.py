@@ -59,7 +59,7 @@ class AdapterModel(nn.Module):
 
         # other language in encoder
         # store as a normal list
-        self.lora_mods = initialize_lora(self.model.encoder)
+        self.lora_mods = initialize_lora(self.model.encoder, r=16)
         # self.lora_mods = initialize_lora(self.model.decoder)
 
     def inner_params(self):

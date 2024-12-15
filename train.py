@@ -24,7 +24,9 @@ device = torch.device(device_name)
 batch_size = 128
 num_workers = 2
 num_passes = 3
-model_suffix = 'base'
+model_suffix = 'r16'
+
+print('Training model', model_suffix)
 
 cache_dir = '/home/pipoika3/nobackup/autodelete/temp/'
 cache_dir += f'maml-lora-{random.randint(0, 10**9-1):09d}'
@@ -68,6 +70,10 @@ criterion = nn.CrossEntropyLoss(ignore_index=1)
 
 model.to(device)
 
+# TODO: cache these values if I am going to grow them
+approx_level = 0 # change this
+num_full_level = 10**9
+
 # resume from checkpoint
 outer_step = 0
 best_val = math.inf
@@ -80,11 +86,10 @@ if os.path.exists(f'checkpoint_{model_suffix}.pt'):
     outer_optim.load_state_dict(outer_state['optim_state'])
 
 
+
 for outer_step in range(outer_step, 1000):
 
     num_tasks = 1 + min(9, outer_step // 20) # was 2
-    approx_level = 1 # change this
-    num_full_level = 2
 
     max_num_steps = 10 + outer_step # warm this up
 
@@ -170,7 +175,6 @@ for outer_step in range(outer_step, 1000):
             approx_grads = outer_grads
         else:
             with torch.no_grad():
-                # TODO: None checking
                 outer_grads = [safe_add(a,b.grad) for a, b in zip(outer_grads, model.outer_params())]
                 approx_grads = [safe_add(a,b.grad) for a, b in zip(approx_grads, model.outer_params())]
 
@@ -257,6 +261,10 @@ for outer_step in range(outer_step, 1000):
                         b_norm += (b * b).sum()
                 rat = dot_prod / (a_norm * b_norm)**0.5
                 rat = max(min(1, rat), -1)
+                # if rat < 0.9999:
+                #     approx_level += 1 # change this
+                #     num_full_level += 1
+                #     print('Increased grad level', num_full_level)
                 angle = math.acos(rat) * 180 / math.pi
                 print(f'Approximation cos {rat}')
 
@@ -268,7 +276,7 @@ for outer_step in range(outer_step, 1000):
         outer_optim.zero_grad() # not really needed, but doesn't hurt to be safe
 
     ### VALIDATION
-    if (outer_step + 1) % 5 == 0:
+    if (outer_step + 1) % 10 == 0:
         val_perf = 0
         for i, cur_data in enumerate(val_sets):
             model.reset_adapter()
